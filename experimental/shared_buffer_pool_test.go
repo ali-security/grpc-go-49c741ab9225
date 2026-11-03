@@ -48,7 +48,7 @@ const defaultTestTimeout = 10 * time.Second
 func (s) TestRecvBufferPoolStream(t *testing.T) {
 	// TODO: How much of this test can be preserved now that buffer reuse happens at
 	// the codec and HTTP/2 level?
-	t.SkipNow()
+	t.Skip("disabled upstream: buffer reuse now happens at the codec and HTTP/2 level, see TODO")
 	tcs := []struct {
 		name     string
 		callOpts []grpc.CallOption
@@ -133,7 +133,7 @@ func (s) TestRecvBufferPoolStream(t *testing.T) {
 
 func (s) TestRecvBufferPoolUnary(t *testing.T) {
 	// TODO: See above
-	t.SkipNow()
+	t.Skip("disabled upstream: buffer reuse now happens at the codec and HTTP/2 level, see TODO")
 	tcs := []struct {
 		name     string
 		callOpts []grpc.CallOption

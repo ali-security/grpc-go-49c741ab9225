@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -55,6 +56,9 @@ type Closable interface {
 }
 
 func (s) TestValidTlsBuilder(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("cert file paths embedded in JSON config; Windows `\\` breaks JSON escape parsing")
+	}
 	caCert := testdata.Path("x509/server_ca_cert.pem")
 	clientCert := testdata.Path("x509/client1_cert.pem")
 	clientKey := testdata.Path("x509/client1_key.pem")
@@ -116,6 +120,9 @@ func (s) TestValidTlsBuilder(t *testing.T) {
 }
 
 func (s) TestInvalidTlsBuilder(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("cert file paths embedded in JSON config; Windows `\\` breaks JSON escape parsing")
+	}
 	tests := []struct {
 		name, jd, wantErrPrefix string
 	}{
@@ -145,6 +152,9 @@ func (s) TestInvalidTlsBuilder(t *testing.T) {
 }
 
 func (s) TestCaReloading(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("cert file paths embedded in JSON config; Windows `\\` breaks JSON escape parsing")
+	}
 	serverCa, err := os.ReadFile(testdata.Path("x509/server_ca_cert.pem"))
 	if err != nil {
 		t.Fatalf("Failed to read test CA cert: %s", err)
@@ -225,6 +235,9 @@ func (s) TestCaReloading(t *testing.T) {
 }
 
 func (s) TestMTLS(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("cert file paths embedded in JSON config; Windows `\\` breaks JSON escape parsing")
+	}
 	s := stubserver.StartTestService(t, nil, grpc.Creds(testutils.CreateServerTLSCredentials(t, tls.RequireAndVerifyClientCert)))
 	defer s.Stop()
 

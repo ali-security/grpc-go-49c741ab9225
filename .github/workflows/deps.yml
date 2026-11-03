@@ -2,7 +2,7 @@ name: Dependency Changes
 
 # Trigger on PRs.
 on:
-  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read

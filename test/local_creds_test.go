@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -120,6 +121,9 @@ func (s) TestLocalCredsLocalhost(t *testing.T) {
 }
 
 func (s) TestLocalCredsUDS(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix domain socket listen")
+	}
 	addr := fmt.Sprintf("/tmp/grpc_fullstck_test%d", time.Now().UnixNano())
 	if err := testLocalCredsE2ESucceed("unix", addr); err != nil {
 		t.Fatalf("Failed e2e test for UDS: %v", err)

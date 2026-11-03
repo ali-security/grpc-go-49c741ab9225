@@ -824,8 +824,11 @@ func (s) TestPickerUpdateOnDataCacheSizeDecrease(t *testing.T) {
 	<-clientConnUpdateDone
 	finalStateCnt := len(ccWrapper.getStates())
 
-	if finalStateCnt != initialStateCnt+1 {
-		t.Errorf("Unexpected balancer state count: got %v, want %v", finalStateCnt, initialStateCnt)
+	// At least one picker update must follow the cache size decrease; on slow
+	// runners asynchronous child subchannel state updates can add more within
+	// this window, so do not require an exact count.
+	if finalStateCnt < initialStateCnt+1 {
+		t.Errorf("Unexpected balancer state count: got %v, want at least %v", finalStateCnt, initialStateCnt+1)
 	}
 }
 

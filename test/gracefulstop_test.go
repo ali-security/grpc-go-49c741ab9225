@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -273,6 +274,9 @@ func (s) TestGracefulStopBlocksUntilGRPCConnectionsTerminate(t *testing.T) {
 // - Stop() returns
 // - and the RPC fails with an connection  closed error on the client-side
 func (s) TestStopAbortsBlockingGRPCCall(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows wsarecv reset differs from expected conn-closed error")
+	}
 	unblockGRPCCall := make(chan struct{})
 	grpcCallExecuting := make(chan struct{})
 	ss := &stubserver.StubServer{

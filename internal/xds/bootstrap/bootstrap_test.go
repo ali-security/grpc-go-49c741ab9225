@@ -318,7 +318,7 @@ func testGetConfigurationWithFileContentEnv(t *testing.T, fileName string, wantE
 	t.Helper()
 	b, err := bootstrapFileReadFunc(fileName)
 	if err != nil {
-		t.Skip(err)
+		t.Skipf("no bootstrap content to inject for %q (%v); the file-name variant of this case covers it", fileName, err)
 	}
 	origBootstrapContent := envconfig.XDSBootstrapFileContent
 	envconfig.XDSBootstrapFileContent = string(b)

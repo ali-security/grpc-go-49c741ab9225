@@ -2,8 +2,6 @@ name: Stale bot
 
 on:
   workflow_dispatch:
-  schedule:
-  - cron: "44 */2 * * *"
 
 permissions:
   contents: read

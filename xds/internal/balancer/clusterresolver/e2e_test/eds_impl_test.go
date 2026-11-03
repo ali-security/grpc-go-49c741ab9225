@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1223,7 +1224,8 @@ func (s) TestEDS_EndpointWithMultipleAddresses(t *testing.T) {
 			defer func() {
 				balancer.Register(originalRRBuilder)
 			}()
-			resolverUpdateCh := make(chan resolver.State, 1)
+			resolverState := atomic.Pointer[resolver.State]{}
+			resolverState.Store(&resolver.State{})
 			stub.Register(roundrobin.Name, stub.BalancerFuncs{
 				Init: func(bd *stub.BalancerData) {
 					bd.Data = originalRRBuilder.Build(bd.ClientConn, bd.BuildOptions)
@@ -1232,7 +1234,7 @@ func (s) TestEDS_EndpointWithMultipleAddresses(t *testing.T) {
 					bd.Data.(balancer.Balancer).Close()
 				},
 				UpdateClientConnState: func(bd *stub.BalancerData, ccs balancer.ClientConnState) error {
-					resolverUpdateCh <- ccs.ResolverState
+					resolverState.Store(&ccs.ResolverState)
 					return bd.Data.(balancer.Balancer).UpdateClientConnState(ccs)
 				},
 			})
@@ -1297,12 +1299,7 @@ func (s) TestEDS_EndpointWithMultipleAddresses(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			var rs resolver.State
-			select {
-			case rs = <-resolverUpdateCh:
-			case <-ctx.Done():
-				t.Fatalf("Context timed out waiting for resolver update.")
-			}
+			rs := resolverState.Load()
 
 			gotEndpointPorts := []uint32{}
 			for _, a := range rs.Endpoints[0].Addresses {

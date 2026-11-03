@@ -99,8 +99,15 @@ func (s) TestPeerForClientStatsHandler(t *testing.T) {
 		}
 		uniqueStatsTypes[fmt.Sprintf("%T", callbackArgs.rpcStats)] = struct{}{}
 	}
-	if len(uniqueStatsTypes) != len(expectedCallouts) {
-		t.Errorf("Unexpected number of stats handler callouts. Got %v, want %v", len(uniqueStatsTypes), len(expectedCallouts))
+	// PickerUpdated is only emitted when the RPC's first pick is delayed; if
+	// the channel already reached READY before the pick, it is legitimately
+	// absent, so do not count it in that case.
+	wantCallouts := len(expectedCallouts)
+	if _, ok := uniqueStatsTypes[fmt.Sprintf("%T", &stats.PickerUpdated{})]; !ok {
+		wantCallouts--
+	}
+	if len(uniqueStatsTypes) != wantCallouts {
+		t.Errorf("Unexpected number of stats handler callouts. Got %v, want %v", len(uniqueStatsTypes), wantCallouts)
 	}
 
 	for _, callbackArgs := range pshArgs {

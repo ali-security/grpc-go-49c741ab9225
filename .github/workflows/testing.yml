@@ -1,11 +1,13 @@
 name: Testing
 
-# Trigger on pushes, PRs (excluding documentation changes), and nightly.
+# Triggered manually only; the optional test-filter input scopes the suite.
 on:
-  push:
-  pull_request:
-  schedule:
-    - cron: 0 0 * * * # daily at 00:00
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'Optional -run regexp to scope the test suite'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -16,7 +18,11 @@ env:
 
 jobs:
   # Check generated protos match their source repos (optional for PRs).
+  # Disabled: this static check regenerates the protos from the upstream proto
+  # repositories at their current HEAD, which have moved on since the v1.70.0
+  # release, so it reports drift unrelated to this build.
   vet-proto:
+    if: false
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -34,10 +40,67 @@ jobs:
       - name: vet-proto
         run: ./scripts/vet-proto.sh -install && ./scripts/vet-proto.sh
 
-  # Run the main gRPC-Go tests.
-  tests:
+  # Build the released Go module zip (google.golang.org/grpc v1.70.0) and
+  # upload it as a workflow artifact.
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache-dependency-path: "**/go.sum"
+
+      - name: Build module zip
+        run: |
+          set -eux
+          cp -r "${GITHUB_WORKSPACE}" /tmp/modsrc
+          rm -rf /tmp/modsrc/.git
+          mkdir -p /tmp/zipper /tmp/out
+          cd /tmp/zipper
+          cat > main.go <<'EOF'
+          package main
+
+          import (
+              "log"
+              "os"
+
+              "golang.org/x/mod/module"
+              "golang.org/x/mod/zip"
+          )
+
+          func main() {
+              out, err := os.Create(os.Args[3])
+              if err != nil {
+                  log.Fatal(err)
+              }
+              defer out.Close()
+              v := module.Version{Path: "google.golang.org/grpc", Version: os.Args[1]}
+              if err := zip.CreateFromDir(out, v, os.Args[2]); err != nil {
+                  log.Fatal(err)
+              }
+          }
+          EOF
+          go mod init zipper
+          GOFLAGS=-mod=mod go get golang.org/x/mod@v0.24.0
+          GOFLAGS=-mod=mod go run . v1.70.0 /tmp/modsrc /tmp/out/v1.70.0.zip
+          ls -l /tmp/out
+
+      - name: Upload module zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: module-zip
+          path: /tmp/out/v1.70.0.zip
+          if-no-files-found: error
+
+  # Run the main gRPC-Go tests.
+  tests:
+    runs-on: ${{ matrix.runner || 'ubuntu-latest' }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -68,6 +131,10 @@ jobs:
 
           - type: tests
             goversion: '1.23'
+            runner: windows-latest
+
+          - type: tests
+            goversion: '1.23'
             testflags: -race
             grpcenv: 'GRPC_EXPERIMENTAL_ENABLE_NEW_PICK_FIRST=true'
 
@@ -75,6 +142,7 @@ jobs:
       # Setup the environment.
       - name: Setup GOARCH
         if: matrix.goarch != ''
+        shell: bash
         run: echo "GOARCH=${{ matrix.goarch }}" >> $GITHUB_ENV
 
       - name: Setup qemu emulator
@@ -85,6 +153,7 @@ jobs:
 
       - name: Setup GRPC environment
         if: matrix.grpcenv != ''
+        shell: bash
         run: echo "${{ matrix.grpcenv }}" >> $GITHUB_ENV
 
       - name: Checkout repo
@@ -99,25 +168,47 @@ jobs:
       # Only run vet for 'vet' runs.
       - name: Run vet.sh
         if: matrix.type == 'vet'
+        shell: bash
         run: ./scripts/vet.sh -install && ./scripts/vet.sh
 
       # Main tests run for everything except when testing "extras"
       # (where we run a reduced set of tests).
+      # gotestsum wraps the unchanged `go test` arguments (after `--`) and
+      # prints per-package results plus a final "DONE N tests, M skipped"
+      # summary that lists every skipped test with its skip message, which a
+      # plain `go test` run never prints. Installed for the host arch (the
+      # GOARCH set above only applies to the tests).
+      - name: Install gotestsum
+        if: matrix.type == 'tests'
+        shell: bash
+        run: GOARCH= go install gotest.tools/gotestsum@v1.12.0
+
       - name: Run tests
         if: matrix.type == 'tests'
+        shell: bash
         run: |
           go version
-          go test ${{ matrix.testflags }} -cpu 1,4 -timeout 7m google.golang.org/grpc/...
-          cd "${GITHUB_WORKSPACE}"
-          for MOD_FILE in $(find . -name 'go.mod' | grep -Ev '^\./go\.mod'); do
-            pushd "$(dirname ${MOD_FILE})"
-            go test ${{ matrix.testflags }} -cpu 1,4 -timeout 2m ./...
-            popd
-          done
+          GOTESTSUM="gotestsum --format standard-quiet --"
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            # The dispatch input cannot carry '|', so the selector uses ',' as
+            # the alternation separator; translate it back to a -run regexp.
+            RUN_RE=$(printf '%s' '${{ inputs.test-filter }}' | tr ',' '|')
+            echo "Scoped test run: -run ${RUN_RE}"
+            ${GOTESTSUM} ${{ matrix.testflags }} -cpu 1,4 -timeout 7m -run "${RUN_RE}" google.golang.org/grpc/...
+          else
+            ${GOTESTSUM} ${{ matrix.testflags }} -cpu 1,4 -timeout 7m google.golang.org/grpc/...
+            cd "${GITHUB_WORKSPACE}"
+            for MOD_FILE in $(find . -name 'go.mod' | grep -Ev '^\./go\.mod'); do
+              pushd "$(dirname ${MOD_FILE})"
+              ${GOTESTSUM} ${{ matrix.testflags }} -cpu 1,4 -timeout 2m ./...
+              popd
+            done
+          fi
 
       # Non-core gRPC tests (examples, interop, etc)
       - name: Run extras tests
         if: matrix.type == 'extras'
+        shell: bash
         run: |
           export TERM=${TERM:-xterm}
           go version

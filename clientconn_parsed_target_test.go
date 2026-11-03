@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"runtime"
 	"testing"
 	"time"
 
@@ -204,6 +205,9 @@ func (s) TestParsedTarget_Failure_WithoutCustomDialer(t *testing.T) {
 }
 
 func (s) TestParsedTarget_WithCustomDialer(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix scheme normalization differs on Windows")
+	}
 	resetInitialResolverState()
 	defScheme := resolver.GetDefaultScheme()
 	tests := []struct {
