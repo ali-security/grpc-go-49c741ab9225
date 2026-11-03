@@ -767,9 +767,8 @@ func (t *http2Client) NewStream(ctx context.Context, callHdr *CallHdr) (*ClientS
 			close(s.headerChan)
 		}
 	}
-	hdr := &headerFrame{
-		hf:        headerFields,
-		endStream: false,
+	hdr := &clientHeaders{
+		hf: headerFields,
 		initStream: func(uint32) error {
 			t.mu.Lock()
 			// TODO: handle transport closure in loopy instead and remove this
@@ -1195,7 +1194,10 @@ func (t *http2Client) handleData(f *http2.DataFrame) {
 		}
 		if f.Header().Flags.Has(http2.FlagDataPadded) {
 			if w := s.fc.onRead(size - uint32(len(f.Data()))); w > 0 {
-				t.controlBuf.put(&outgoingWindowUpdate{s.id, w})
+				t.controlBuf.put(&outgoingWindowUpdate{
+					streamID:  s.id,
+					increment: w,
+				})
 			}
 		}
 		// TODO(bradfitz, zhaoq): A copy is required here because there is no
@@ -1810,7 +1812,7 @@ func (t *http2Client) getOutFlowWindow() int64 {
 	resp := make(chan uint32, 1)
 	timer := time.NewTimer(time.Second)
 	defer timer.Stop()
-	t.controlBuf.put(&outFlowControlSizeRequest{resp})
+	t.controlBuf.put(&outFlowControlSizeRequest{resp: resp})
 	select {
 	case sz := <-resp:
 		return int64(sz)
