@@ -526,6 +526,22 @@ func (t *http2Server) operateHeaders(ctx context.Context, frame *http2.MetaHeade
 		delete(mdata, "host")
 	}
 
+	// If :authority is still missing, i.e. no host or :authority header is
+	// present, reject the request as invalid.
+	if len(mdata[":authority"]) == 0 {
+		errMsg := "no host or :authority header present"
+		if t.logger.V(logLevel) {
+			t.logger.Infof("Aborting the stream early: %v", errMsg)
+		}
+		t.controlBuf.put(&earlyAbortStream{
+			httpStatus:     http.StatusBadRequest,
+			streamID:       streamID,
+			contentSubtype: s.contentSubtype,
+			status:         status.New(codes.Internal, errMsg),
+			rst:            !frame.StreamEnded(),
+		})
+		return nil
+	}
 	if frame.StreamEnded() {
 		// s is just created by the caller. No lock needed.
 		s.state = streamReadDone

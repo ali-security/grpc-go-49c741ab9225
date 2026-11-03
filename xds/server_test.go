@@ -34,6 +34,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/credentials/tls/certprovider"
@@ -41,8 +42,12 @@ import (
 	"google.golang.org/grpc/internal/grpctest"
 	"google.golang.org/grpc/internal/testutils"
 	"google.golang.org/grpc/internal/testutils/xds/e2e"
+	"google.golang.org/grpc/internal/transport"
 	"google.golang.org/grpc/internal/xds/bootstrap"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/xds/internal/xdsclient"
+	"google.golang.org/grpc/xds/internal/xdsclient/xdsresource"
 	"google.golang.org/grpc/xds/internal/xdsclient/xdsresource/version"
 
 	v3listenerpb "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
@@ -716,4 +721,44 @@ func (s) TestServeAndCloseDoNotRace(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// fakeRouteConfigConn is a net.Conn which provides the routing configuration
+// to routeAndProcess, as the xDS server's connection wrapper does.
+type fakeRouteConfigConn struct {
+	net.Conn
+	urc xdsresource.UsableRouteConfiguration
+}
+
+func (c *fakeRouteConfigConn) UsableRouteConfiguration() xdsresource.UsableRouteConfiguration {
+	return c.urc
+}
+
+type testServerTransportStream struct {
+	method string
+}
+
+func (s *testServerTransportStream) Method() string               { return s.method }
+func (s *testServerTransportStream) SetHeader(metadata.MD) error  { return nil }
+func (s *testServerTransportStream) SendHeader(metadata.MD) error { return nil }
+func (s *testServerTransportStream) SetTrailer(metadata.MD) error { return nil }
+
+// TestRouteAndProcess_MissingAuthority tests that an incoming RPC with no
+// :authority header in its metadata is failed with status code Internal by the
+// xDS routing logic, instead of causing a panic.
+func (s) TestRouteAndProcess_MissingAuthority(t *testing.T) {
+	cw := &fakeRouteConfigConn{urc: xdsresource.UsableRouteConfiguration{}}
+	ctx, cancel := context.WithTimeout(context.Background(), defaultTestTimeout)
+	defer cancel()
+	ctx = transport.SetConnection(ctx, cw)
+	ctx = grpc.NewContextWithServerTransportStream(ctx, &testServerTransportStream{method: "/test.Service/Method"})
+	ctx = metadata.NewIncomingContext(ctx, metadata.MD{})
+
+	err := routeAndProcess(ctx)
+	if status.Code(err) != codes.Internal {
+		t.Fatalf("routeAndProcess() returned error code %v, want %v", status.Code(err), codes.Internal)
+	}
+	if !strings.Contains(err.Error(), "no :authority header present") {
+		t.Fatalf("routeAndProcess() returned error message %q, want %q", err.Error(), "no :authority header present")
+	}
 }
