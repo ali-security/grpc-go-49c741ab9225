@@ -43,6 +43,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/internal/channelz"
+	"google.golang.org/grpc/internal/envconfig"
 	"google.golang.org/grpc/internal/grpctest"
 	"google.golang.org/grpc/internal/leakcheck"
 	"google.golang.org/grpc/internal/testutils"
@@ -1779,7 +1780,7 @@ func waitWhileTrue(t *testing.T, condition func() (bool, error)) {
 // If any error occurs on a call to Stream.Read, future calls
 // should continue to return that same error.
 func (s) TestReadGivesSameErrorAfterAnyErrorOccurs(t *testing.T) {
-	testRecvBuffer := newRecvBuffer()
+	testRecvBuffer := newRecvBuffer(mem.DefaultBufferPool())
 	s := &Stream{
 		ctx:         context.Background(),
 		buf:         testRecvBuffer,
@@ -2936,7 +2937,7 @@ func (s) TestClientCloseReturnsEarlyWhenGoAwayWriteHangs(t *testing.T) {
 // number of bytes read for flow control is correct.
 func (s) TestReadMessageHeaderMultipleBuffers(t *testing.T) {
 	headerLen := 5
-	recvBuffer := newRecvBuffer()
+	recvBuffer := newRecvBuffer(mem.DefaultBufferPool())
 	recvBuffer.put(recvMsg{buffer: make(mem.SliceBuffer, 3)})
 	recvBuffer.put(recvMsg{buffer: make(mem.SliceBuffer, headerLen-3)})
 	bytesRead := 0
@@ -2959,5 +2960,235 @@ func (s) TestReadMessageHeaderMultipleBuffers(t *testing.T) {
 	}
 	if bytesRead != headerLen {
 		t.Errorf("bytesRead = %d, want = %d", bytesRead, headerLen)
+	}
+}
+
+func (s) TestRecvBufferCompaction(t *testing.T) {
+	pool := mem.DefaultBufferPool()
+	b := newRecvBuffer(pool)
+
+	// We want to trigger compaction.
+	// Compaction triggers when:
+	// 1. backlogHeapSize > compactionThreshold
+	// 2. backlogHeapSize / b.uncompactedBytes > utilizationFactor
+	//
+	// For N messages in backlog, each of 1 byte:
+	// b.uncompactedSuffixLen = N
+	// b.uncompactedBytes = N
+	// backlogHeapSize = N * recvMsgSize + N = N * (recvMsgSize + 1)
+	//
+	// To trigger compaction:
+	// N * (recvMsgSize + 1) > compactionThreshold
+	// Since compactionThreshold = bufferPoolingThreshold * (recvMsgSize + 1),
+	// this simplifies to:
+	// N > bufferPoolingThreshold
+	//
+	// So we need N = bufferPoolingThreshold + 1 messages in the backlog.
+	// The first message put into the recvBuffer goes directly to the channel b.c,
+	// and subsequent messages go to the backlog.
+	// Therefore, we need to put a total of 1 (for channel) + (bufferPoolingThreshold + 1) messages.
+	numMessages := bufferPoolingThreshold + 2
+	payload := []byte{0x0a}
+
+	for i := 0; i < numMessages-1; i++ {
+		b.put(recvMsg{buffer: mem.Copy(payload, pool)})
+	}
+
+	// Verify no compaction occurred.
+	if got, want := len(b.backlog), numMessages-2; got != want {
+		t.Fatalf("Got backlog length %d, want %d", got, want)
+	}
+
+	b.put(recvMsg{buffer: mem.Copy(payload, pool)})
+
+	// Verify that compaction occurred.
+	// The first message is in the channel.
+	// The remaining (bufferPoolingThreshold + 1) messages went to the backlog and should have
+	// been compacted into 1 message. So the backlog length should be exactly 1.
+	if got, want := len(b.backlog), 1; got != want {
+		t.Fatalf("Got backlog length %d after compaction, want %d", got, want)
+	}
+	if b.uncompactedSuffixLen != 0 {
+		t.Fatalf("Got uncompactedSuffixLen %d, want %d", b.uncompactedSuffixLen, 0)
+	}
+	if b.uncompactedBytes != 0 {
+		t.Fatalf("Got uncompactedBytes %d, want %d", b.uncompactedBytes, 0)
+	}
+
+	// Verify the contents of the first message (not compacted, in channel).
+	select {
+	case msg1 := <-b.c:
+		if !bytes.Equal(msg1.buffer.ReadOnlyData(), payload) {
+			t.Errorf("Unexpected first message: %v", msg1)
+		}
+		msg1.buffer.Free()
+	default:
+		t.Fatal("Expected first message to be in the channel")
+	}
+
+	b.load()
+
+	// Verify the compacted message.
+	select {
+	case msgCompacted := <-b.c:
+		wantLen := numMessages - 1
+		if msgCompacted.buffer.Len() != wantLen {
+			t.Errorf("Got compacted buffer length %d, want %d", msgCompacted.buffer.Len(), wantLen)
+		}
+		wantPayload := bytes.Repeat(payload, wantLen)
+		if !bytes.Equal(msgCompacted.buffer.ReadOnlyData(), wantPayload) {
+			t.Errorf("Compacted payload mismatch")
+		}
+		msgCompacted.buffer.Free()
+	default:
+		t.Fatal("Expected compacted message to be loaded into the channel")
+	}
+}
+
+func (s) TestRecvBufferErrorResetsCounters(t *testing.T) {
+	pool := mem.DefaultBufferPool()
+	b := newRecvBuffer(pool)
+
+	payload := []byte{0x0a}
+	// Push 3 messages. First goes to channel, second and third to backlog.
+	b.put(recvMsg{buffer: mem.Copy(payload, pool)})
+	b.put(recvMsg{buffer: mem.Copy(payload, pool)})
+	b.put(recvMsg{buffer: mem.Copy(payload, pool)})
+
+	// Check for suffix len and size.
+	if got, want := b.uncompactedSuffixLen, 2; got != want {
+		t.Fatalf("Got uncompactedSuffixLen %d, want %d", got, want)
+	}
+	if got, want := b.uncompactedBytes, 2; got != want {
+		t.Fatalf("Got uncompactedBytes %d, want %d", got, want)
+	}
+
+	// Read one message.
+	select {
+	case msg1 := <-b.c:
+		if !bytes.Equal(msg1.buffer.ReadOnlyData(), payload) {
+			t.Errorf("Unexpected first message: %v", msg1)
+		}
+		msg1.buffer.Free()
+	default:
+		t.Fatal("Expected first message to be in the channel")
+	}
+	b.load()
+	if got, want := b.uncompactedSuffixLen, 1; got != want {
+		t.Fatalf("Got uncompactedSuffixLen %d, want %d", got, want)
+	}
+	if got, want := b.uncompactedBytes, 1; got != want {
+		t.Fatalf("Got uncompactedBytes %d, want %d", got, want)
+	}
+
+	// Push error.
+	b.put(recvMsg{err: io.EOF})
+
+	// Check that both counters are set to 0.
+	if got, want := b.uncompactedSuffixLen, 0; got != want {
+		t.Fatalf("Got uncompactedSuffixLen %d, want %d", got, want)
+	}
+	if got, want := b.uncompactedBytes, 0; got != want {
+		t.Fatalf("Got uncompactedBytes %d, want %d", got, want)
+	}
+
+	// Cleanup.
+	select {
+	case msg1 := <-b.c:
+		msg1.buffer.Free()
+	default:
+	}
+	for _, msg := range b.backlog {
+		if msg.buffer != nil {
+			msg.buffer.Free()
+		}
+	}
+}
+
+func (s) TestRecvBufferCompactionSkippedLargeBuffer(t *testing.T) {
+	pool := mem.DefaultBufferPool()
+	b := newRecvBuffer(pool)
+
+	// We want to test that compaction is skipped when a large buffer is sent
+	// just before reaching the threshold, because the usage threshold
+	// (utilization factor) is met.
+	//
+	// We put N = bufferPoolingThreshold messages of 1 byte each into the backlog.
+	// Total messages put
+	// = 1 (for channel) + bufferPoolingThreshold (for backlog) = bufferPoolingThreshold + 1.
+	numSmallMessages := bufferPoolingThreshold + 1
+	payload := []byte{0x0a}
+
+	for i := 0; i < numSmallMessages; i++ {
+		b.put(recvMsg{buffer: mem.Copy(payload, pool)})
+	}
+
+	// Verify no compaction occurred and backlog length is bufferPoolingThreshold.
+	if got, want := len(b.backlog), bufferPoolingThreshold; got != want {
+		t.Fatalf("Got backlog length %d, want %d", got, want)
+	}
+
+	// Send a large buffer. We choose a buffer size that satisfies the utilization factor check.
+	threshold := bufferPoolingThreshold*(recvMsgSize-1) + recvMsgSize
+	largePayload := make([]byte, threshold)
+	b.put(recvMsg{buffer: mem.Copy(largePayload, pool)})
+
+	// Verify that compaction was skipped.
+	// Backlog length should be bufferPoolingThreshold + 1.
+	if got, want := len(b.backlog), bufferPoolingThreshold+1; got != want {
+		t.Fatalf("Got backlog length %d after large buffer (compaction skipped), want %d", got, want)
+	}
+	if b.uncompactedSuffixLen != 0 {
+		t.Fatalf("Got uncompactedSuffixLen %d, want %d", b.uncompactedSuffixLen, 0)
+	}
+	if b.uncompactedBytes != 0 {
+		t.Fatalf("Got uncompactedBytes %d, want %d", b.uncompactedBytes, 0)
+	}
+
+	select {
+	case msg1 := <-b.c:
+		msg1.buffer.Free()
+	default:
+		t.Fatal("Expected first message to be in the channel, but channel is empty")
+	}
+	for _, msg := range b.backlog {
+		if msg.buffer != nil {
+			msg.buffer.Free()
+		}
+	}
+}
+
+func (s) TestRecvBufferCompactionDisabled(t *testing.T) {
+	origEnableReceiveBufferCompaction := envconfig.EnableReceiveBufferCompaction
+	envconfig.EnableReceiveBufferCompaction = false
+	defer func() { envconfig.EnableReceiveBufferCompaction = origEnableReceiveBufferCompaction }()
+
+	pool := mem.DefaultBufferPool()
+	b := newRecvBuffer(pool)
+
+	numMessages := bufferPoolingThreshold + 2
+	payload := []byte{0x0a}
+
+	for i := 0; i < numMessages; i++ {
+		b.put(recvMsg{buffer: mem.Copy(payload, pool)})
+	}
+
+	// Verify no compaction occurred.
+	// The first message is in the channel.
+	// The remaining (numMessages - 1) messages should be in the backlog.
+	if got, want := len(b.backlog), numMessages-1; got != want {
+		t.Fatalf("Got backlog length %d, want %d", got, want)
+	}
+
+	select {
+	case msg1 := <-b.c:
+		msg1.buffer.Free()
+	default:
+		t.Fatal("Expected first message to be in the channel, but channel is empty")
+	}
+	for _, msg := range b.backlog {
+		if msg.buffer != nil {
+			msg.buffer.Free()
+		}
 	}
 }

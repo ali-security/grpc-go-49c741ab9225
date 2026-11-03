@@ -413,7 +413,7 @@ func (ht *serverHandlerTransport) HandleStreams(ctx context.Context, startStream
 			id:             0, // irrelevant
 			ctx:            ctx,
 			requestRead:    func(int) {},
-			buf:            newRecvBuffer(),
+			buf:            newRecvBuffer(ht.bufferPool),
 			method:         req.URL.Path,
 			recvCompress:   req.Header.Get("grpc-encoding"),
 			contentSubtype: ht.contentSubtype,

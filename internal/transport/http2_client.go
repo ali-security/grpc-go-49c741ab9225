@@ -486,7 +486,7 @@ func (t *http2Client) newStream(ctx context.Context, callHdr *CallHdr) *ClientSt
 		Stream: &Stream{
 			method:         callHdr.Method,
 			sendCompress:   callHdr.SendCompress,
-			buf:            newRecvBuffer(),
+			buf:            newRecvBuffer(t.bufferPool),
 			contentSubtype: callHdr.ContentSubtype,
 		},
 		ct:         t,
